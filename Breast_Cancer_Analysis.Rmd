@@ -1,0 +1,243 @@
+---
+title: "Mapping and Clustering Breast Cancer Trends in U.S. Women (1999–2021)"
+output:
+  pdf_document: default
+  html_document: default
+date: "02-08-2025"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(naniar)
+library(maps)
+library(cluster)
+library(factoextra)
+library(lubridate)
+library(reshape2)
+```
+
+
+# DATA READ & STRUCTURE
+
+```{r}
+data <- read.csv("USA_Cancer_dataset.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+str(data)
+dim(data)
+colSums(is.na(data))
+sum(duplicated(data))
+```
+
+# Focus: Breast cancer only
+```{r}
+data_bc <- data %>% filter(Leading.Cancer.Sites == "Breast")
+```
+
+
+# EDA — EXPLORATORY INSIGHTS 
+
+
+# Top 10 Cancer Types by Total Count
+```{r}
+top_cancers <- data %>%
+  group_by(Leading.Cancer.Sites) %>%
+  summarise(Total = sum(Count)) %>%
+  arrange(desc(Total)) %>%
+  slice(1:10)
+
+ggplot(top_cancers, aes(x = reorder(Leading.Cancer.Sites, Total), y = Total)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 10 Most Reported Cancers (1999–2021)", x = "Cancer Type", y = "Total Cases") +
+  theme_minimal()
+```
+
+```{r}
+# Filter female breast cancer data
+data_bc <- data %>% filter(Leading.Cancer.Sites == "Breast", Sex == "Female")
+
+# Group by Year
+fig1_data <- data_bc %>%
+  group_by(Year) %>%
+  summarise(Total_Cases = sum(Count), .groups = "drop")
+
+# Plot
+ggplot(fig1_data, aes(x = Year, y = Total_Cases)) +
+  geom_line(color = "darkblue", size = 1.2) +
+  geom_point(color = "red", size = 2) +
+  labs(title = "Total Breast Cancer Cases in the U.S. (1999–2021)",
+       x = "Year", y = "Total Cases") +
+  theme_minimal()
+```
+
+# Breast Cancer by Sex
+```{r}
+ggplot(data_bc, aes(x = Sex, y = Count)) +
+  geom_boxplot(fill = "tomato") +
+  labs(title = "Distribution of Breast Cancer Cases by Sex") +
+  theme_minimal()
+```
+
+# Yearly Trend for Top 3 Female Age Groups
+```{r}
+trend_age <- data_bc %>%
+  filter(Sex == "Female", Age.Groups %in% c("55-59 years", "60-64 years", "65-69 years")) %>%
+  group_by(Year, Age.Groups) %>%
+  summarise(Total = sum(Count), .groups = "drop")
+
+ggplot(trend_age, aes(x = Year, y = Total, color = Age.Groups)) +
+  geom_line(linewidth = 1.2) +
+  labs(title = "Trend Over Time for Top Female Age Groups", x = "Year", y = "Cases", color = "Age Group") +
+  theme_minimal()
+```
+
+# Top Female Age Groups
+```{r}
+female_age_top <- data_bc %>%
+  filter(Sex == "Female") %>%
+  group_by(Age.Groups) %>%
+  summarise(Total = sum(Count)) %>%
+  arrange(desc(Total)) %>%
+  slice(1:10)
+
+ggplot(female_age_top, aes(x = reorder(Age.Groups, Total), y = Total)) +
+  geom_col(fill = "darkorange") + coord_flip() +
+  labs(title = "Top Female Age Groups with Breast Cancer", x = "Age Group", y = "Total Cases") +
+  theme_minimal()
+```
+
+
+# CLUSTERING STATES 
+```{r}
+state_matrix <- data_bc %>%
+  filter(Sex == "Female", Age.Groups == "65-69 years") %>%
+  group_by(States, Year) %>%
+  summarise(Cases = sum(Count), .groups = "drop") %>%
+  pivot_wider(names_from = Year, values_from = Cases, values_fill = 0)
+
+state_matrix_fixed <- data_bc %>%
+  filter(Sex == "Female", Age.Groups == "65-69 years") %>%
+  group_by(States, Year) %>%
+  summarise(Cases = sum(Count), .groups = "drop") %>%
+  pivot_wider(names_from = Year, values_from = Cases, values_fill = 0)
+
+# Save state names before removing column
+state_names <- state_matrix_fixed$States
+
+# Remove state column and assign rownames properly
+state_matrix <- state_matrix_fixed %>% select(-States)
+rownames(state_matrix) <- state_names
+
+# Proceed to scale
+scaled_states <- scale(state_matrix)
+
+```
+
+# Elbow Method
+```{r}
+fviz_nbclust(scaled_states, kmeans, method = "wss") +
+  labs(title = "Elbow Method for Optimal Clusters")
+```
+
+# Silhouette Method
+```{r}
+fviz_nbclust(scaled_states, kmeans, method = "silhouette") +
+  labs(title = "Silhouette Width Across Cluster Sizes")
+```
+
+# Apply clustering
+```{r}
+set.seed(123)
+k3 <- kmeans(scaled_states, centers = 3, nstart = 25)
+state_clusters <- data.frame(State = rownames(scaled_states), Cluster = as.factor(k3$cluster))
+```
+
+# PCA View
+```{r}
+fviz_cluster(k3, data = scaled_states, labelsize = 5, main = "PCA-Based State Clustering")
+```
+
+
+# 4. ADVANCED INSIGHTS 
+
+# YoY Growth in Elder Age Groups
+```{r}
+growth_data <- data_bc %>%
+  filter(Sex == "Female", Age.Groups %in% c("65-69 years", "70-74 years", "75-79 years")) %>%
+  group_by(Year, Age.Groups) %>%
+  summarise(Total = sum(Count), .groups = "drop") %>%
+  group_by(Age.Groups) %>%
+  mutate(Growth = (Total - lag(Total)) / lag(Total) * 100)
+
+ggplot(growth_data, aes(x = Year, y = Age.Groups, fill = Growth)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "darkred") +
+  labs(title = "YoY Growth in Elder Female Age Groups",
+       x = "Year", y = "Age Group", fill = "% Growth") +
+  theme_minimal()
+```
+
+# Cumulative Trend 50–74
+```{r}
+data_cum <- data_bc %>%
+  filter(Sex == "Female", Age.Groups %in% c("50-54 years", "55-59 years", "60-64 years", "65-69 years", "70-74 years")) %>%
+  group_by(Age.Groups, Year) %>%
+  summarise(Cases = sum(Count), .groups = "drop") %>%
+  group_by(Age.Groups) %>%
+  mutate(Cumulative = cumsum(Cases))
+
+ggplot(data_cum, aes(x = Year, y = Cumulative, color = Age.Groups)) +
+  geom_line(size = 1.2) +
+  labs(title = "Cumulative Breast Cancer Cases (Females 50–74)", y = "Cumulative Cases") +
+  theme_minimal()
+```
+
+# Cluster Map
+```{r}
+state_clusters$region <- tolower(state_clusters$State)
+us_map <- map_data("state")
+map_cluster <- merge(us_map, state_clusters, by = "region", all.x = TRUE)
+map_cluster <- map_cluster[order(map_cluster$order), ]
+
+ggplot(map_cluster, aes(long, lat, group = group, fill = Cluster)) +
+  geom_polygon(color = "white") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Clustered U.S. States Based on Female Breast Cancer Trends") +
+  theme_void()
+```
+
+# Cluster-wise Growth Comparison: Early vs Late Period (1999–2010 vs 2011–2021)
+```{r}
+# Merge cluster info with time-series case data
+cluster_cases <- data_bc %>%
+  filter(Sex == "Female", Age.Groups == "65-69 years") %>%
+  group_by(States, Year) %>%
+  summarise(Cases = sum(Count), .groups = "drop") %>%
+  left_join(state_clusters, by = c("States" = "State"))
+
+# Calculate avg yearly cases per cluster
+cluster_summary <- cluster_cases %>%
+  group_by(Cluster, Year) %>%
+  summarise(Avg_Cases = mean(Cases), .groups = "drop")
+
+# Calculate average in early vs late period (to compare growth speed)
+cluster_growth_trend <- cluster_summary %>%
+  mutate(Period = ifelse(Year <= 2010, "Early", "Late")) %>%
+  group_by(Cluster, Period) %>%
+  summarise(Avg = mean(Avg_Cases), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = Period, values_from = Avg) %>%
+  mutate(Growth_Change = Late - Early)
+
+print(cluster_growth_trend)
+```
+
