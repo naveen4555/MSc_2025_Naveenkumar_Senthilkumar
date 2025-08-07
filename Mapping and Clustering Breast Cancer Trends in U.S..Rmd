@@ -1,0 +1,215 @@
+---
+title: "Mapping and Clustering Breast Cancer Trends in U.S. (1999–2021)"
+author: "Naveen Kumar Senthilkumar"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(scales)
+library(lubridate)
+library(reshape2)
+library(maps)
+```
+
+The dataset is initially imported and filtered to include only breast cancer cases for females. This filtering step isolates the most relevant subset for age and location-based trend analysis.
+
+```{r}
+data <- read_csv("USA_Cancer_dataset.csv")
+data_bc <- data %>% filter(`Leading Cancer Sites` == "Breast", Sex == "Female")
+```
+
+A temporal overview of breast cancer cases is then constructed to observe the overall national trend between 1999 and 2021.
+
+```{r}
+total_cases <- data_bc %>% group_by(Year) %>% summarise(Total_Cases = sum(Count))
+
+ggplot(total_cases, aes(x = Year, y = Total_Cases)) +
+  geom_line(color = "darkblue", size = 1.2) +
+  geom_point(color = "red", size = 2) +
+  labs(title = "Total Breast Cancer Cases in the U.S. (1999–2021)",
+       y = "Case Count") +
+  theme_minimal()
+```
+
+To identify growth patterns within higher-risk age brackets, the year-on-year growth rates are computed for three elder age groups.
+
+```{r}
+elder_growth <- data_bc %>%
+  filter(`Age Groups` %in% c("65-69 years", "70-74 years", "75-79 years")) %>%
+  group_by(Year, `Age Groups`) %>%
+  summarise(Total = sum(Count), .groups = "drop") %>%
+  group_by(`Age Groups`) %>%
+  mutate(Growth = (Total - lag(Total)) / lag(Total) * 100)
+
+ggplot(elder_growth, aes(x = Year, y = Growth, color = `Age Groups`)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Year-on-Year Growth in Elder Female Age Groups",
+       y = "% Growth") +
+  theme_minimal()
+```
+
+The cumulative case counts are then aggregated across all years to rank the most affected female age groups.
+
+```{r}
+cumulative_age <- data_bc %>%
+  group_by(`Age Groups`) %>%
+  summarise(Total = sum(Count)) %>%
+  arrange(desc(Total)) %>%
+  slice(1:8)
+
+ggplot(cumulative_age, aes(x = reorder(`Age Groups`, Total), y = Total, fill = `Age Groups`)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(title = "Top Age Groups by Cumulative Breast Cancer Cases",
+       x = "Age Group", y = "Total Cases") +
+  theme_minimal()
+```
+
+```{r}
+# Filter and prepare growth data for elder female age groups
+growth_data <- data_bc %>%
+  filter(`Age Groups` %in% c("65-69 years", "70-74 years", "75-79 years")) %>%
+  group_by(Year, `Age Groups`) %>%
+  summarise(Total = sum(Count), .groups = "drop") %>%
+  group_by(`Age Groups`) %>%
+  arrange(Year) %>%
+  mutate(Yearly_Growth = (Total - lag(Total)) / lag(Total) * 100)
+
+# Plot the year-on-year growth
+ggplot(growth_data, aes(x = Year, y = Yearly_Growth, color = `Age Groups`)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Figure 2: Year-on-Year Growth in Elder Female Age Groups",
+    x = "Year",
+    y = "Growth (%)",
+    color = "Age Group"
+  ) +
+  theme_minimal()
+```
+
+
+To enable clustering, the dataset is transformed into a time series matrix with states as rows and yearly case counts (age 65–69) as columns.
+
+```{r}
+state_ts <- data_bc %>%
+  filter(`Age Groups` == "65-69 years") %>%
+  group_by(States, Year) %>%
+  summarise(Cases = sum(Count), .groups = "drop") %>%
+  pivot_wider(names_from = Year, values_from = Cases, values_fill = 0)
+
+scaled_states <- state_ts %>%
+  column_to_rownames("States") %>%
+  as.data.frame() %>%
+  scale()
+```
+
+To determine an appropriate number of clusters, two validation techniques are applied: the Elbow method and the Silhouette method.
+
+```{r}
+fviz_nbclust(scaled_states, kmeans, method = "wss") + theme_minimal()
+fviz_nbclust(scaled_states, kmeans, method = "silhouette") + theme_minimal()
+```
+
+K-means clustering is then executed using three clusters as informed by the prior methods.
+
+```{r}
+k3 <- kmeans(scaled_states, centers = 3, nstart = 25)
+cluster_df <- data.frame(State = rownames(scaled_states), Cluster = as.factor(k3$cluster))
+```
+
+Principal Component Analysis (PCA) is performed to reduce dimensionality and visually interpret cluster separations in a two-dimensional space.
+
+```{r}
+# Prepare cluster dataframe for joining
+cluster_df <- cluster_df %>%
+  mutate(region = tolower(State))
+
+# Load map data
+us_map <- map_data("state")
+
+# Join map and cluster assignment
+map_clustered <- left_join(us_map, cluster_df, by = "region")
+
+# Plot the map
+ggplot(map_clustered, aes(long, lat, group = group, fill = as.factor(Cluster))) +
+  geom_polygon(color = "white") +
+  coord_fixed(1.3) +
+  scale_fill_brewer(palette = "Set2", name = "Cluster") +
+  labs(title = "K-Means Clustering of U.S. States (Age 65–69 Breast Cancer Trends)",
+       caption = "Source: CDC WONDER, 1999–2021") +
+  theme_minimal()
+```
+
+```{r}
+pca_out <- prcomp(scaled_states)
+
+fviz_pca_ind(pca_out,
+             geom.ind = "point",
+             col.ind = cluster_df$Cluster,
+             palette = "jco",
+             legend.title = "Cluster")
+```
+
+To quantify variability in time trends within each cluster, the coefficient of variation (CV) is computed for each state and grouped by cluster.
+
+```{r}
+cv_data <- state_ts %>%
+  column_to_rownames("States") %>%
+  as.data.frame() %>%
+  mutate(CV = apply(., 1, function(x) sd(x)/mean(x))) %>%
+  rownames_to_column("States") %>%
+  left_join(cluster_df, by = c("States" = "State"))
+
+ggplot(cv_data, aes(x = Cluster, y = CV, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Volatility in Trends (Age 65–69) by Cluster",
+       y = "Coefficient of Variation") +
+  theme_minimal()
+```
+
+The longitudinal trends for each state are then plotted by cluster membership to help visualize grouped temporal behaviors.
+
+```{r}
+long_cases <- state_ts %>%
+  pivot_longer(-States, names_to = "Year", values_to = "Cases") %>%
+  mutate(Year = as.numeric(Year)) %>%
+  left_join(cluster_df, by = c("States" = "State"))
+
+ggplot(long_cases, aes(x = Year, y = Cases, group = States, color = Cluster)) +
+  geom_line(alpha = 0.6) +
+  labs(title = "State-wise Trends for Age 65–69 by Cluster",
+       y = "Cases") +
+  theme_minimal()
+```
+```{r}
+# Add period labels to yearly data
+cluster_case_trends <- long_cases %>%
+  mutate(Period = ifelse(Year <= 2010, "1999–2010", "2011–2021"))
+
+# Calculate average case counts by cluster and period
+summary_table <- cluster_case_trends %>%
+  group_by(Cluster, Period) %>%
+  summarise(Avg_Cases = round(mean(Cases), 1), .groups = "drop") %>%
+  pivot_wider(names_from = Period, values_from = Avg_Cases)
+
+# View the final table
+print(summary_table)
+```
+
+```{r}
+ggplot(summary_table_long <- cluster_case_trends %>%
+         group_by(Cluster, Period) %>%
+         summarise(Avg_Cases = round(mean(Cases), 1), .groups = "drop"),
+       aes(x = Cluster, y = Avg_Cases, fill = Period)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Breast Cancer Cases (Age 65–69) by Cluster and Period",
+       x = "Cluster", y = "Average Case Count") +
+  theme_minimal()
+```
