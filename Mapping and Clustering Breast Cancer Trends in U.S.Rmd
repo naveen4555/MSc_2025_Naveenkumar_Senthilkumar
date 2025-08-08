@@ -1,0 +1,184 @@
+---
+title: "Mapping and Clustering Breast Cancer Trends in U.S. (1999–2021)"
+author: "Naveen Kumar Senthilkumar"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: html_notebook
+---
+
+```{r}
+# Load the required libraries for data manipulation, visualization, and clustering
+library(tidyverse)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(scales)
+library(lubridate)
+library(reshape2)
+library(maps)
+```
+
+```{r}
+# Import the dataset and filter for female breast cancer cases to focus on relevant records
+data <- read_csv("USA_Cancer_dataset.csv")
+data_bc <- data %>% filter(`Leading Cancer Sites` == "Breast", Sex == "Female")
+```
+
+```{r}
+# Aggregate and visualize the national annual trend in breast cancer cases (all ages) to provide baseline context
+total_cases <- data_bc %>% group_by(Year) %>% summarise(Total_Cases = sum(Count))
+
+ggplot(total_cases, aes(x = Year, y = Total_Cases)) +
+  geom_line(color = "darkblue", size = 1.2) +
+  geom_point(color = "red", size = 2) +
+  labs(title = "Total Breast Cancer Cases in the U.S. (1999–2021)",
+       y = "Case Count") +
+  theme_minimal()
+```
+
+```{r}
+# Compare year-on-year growth rates for older female age groups to identify the most stable and interpretable target group
+elder_growth <- data_bc %>%
+  filter(`Age Groups` %in% c("65-69 years", "70-74 years", "75-79 years")) %>%
+  group_by(Year, `Age Groups`) %>%
+  summarise(Total = sum(Count), .groups = "drop") %>%
+  group_by(`Age Groups`) %>%
+  mutate(Growth = (Total - lag(Total)) / lag(Total) * 100)
+
+ggplot(elder_growth, aes(x = Year, y = Growth, color = `Age Groups`)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Year-on-Year Growth in Elder Female Age Groups",
+       y = "% Growth") +
+  theme_minimal()
+```
+
+```{r}
+# Calculate and visualise cumulative breast cancer cases across female age groups to confirm selection of the 65–69 group
+cumulative_age <- data_bc %>%
+  group_by(`Age Groups`) %>%
+  summarise(Total = sum(Count)) %>%
+  arrange(desc(Total)) %>%
+  slice(1:8)
+
+ggplot(cumulative_age, aes(x = reorder(`Age Groups`, Total), y = Total, fill = `Age Groups`)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(title = "Top Age Groups by Cumulative Breast Cancer Cases",
+       x = "Age Group", y = "Total Cases") +
+  theme_minimal()
+```
+
+```{r}
+# Create a state-by-year matrix for breast cancer cases in the 65–69 age group and standardize it for clustering
+state_ts <- data_bc %>%
+  filter(`Age Groups` == "65-69 years") %>%
+  group_by(States, Year) %>%
+  summarise(Cases = sum(Count), .groups = "drop") %>%
+  pivot_wider(names_from = Year, values_from = Cases, values_fill = 0)
+
+scaled_states <- state_ts %>%
+  column_to_rownames("States") %>%
+  as.data.frame() %>%
+  scale()
+```
+
+```{r}
+# Use the Elbow method to identify the point where adding more clusters yields minimal improvement
+fviz_nbclust(scaled_states, kmeans, method = "wss") + theme_minimal()
+```
+
+```{r}
+# Apply the Silhouette method to assess the quality and separation of potential cluster solutions
+fviz_nbclust(scaled_states, kmeans, method = "silhouette") + theme_minimal()
+```
+
+```{r}
+# Perform K-means clustering with three clusters, as indicated by the diagnostic methods
+k3 <- kmeans(scaled_states, centers = 3, nstart = 25)
+cluster_df <- data.frame(State = rownames(scaled_states), Cluster = as.factor(k3$cluster))
+```
+
+```{r}
+# Visualise the PCA projection to interpret and confirm separation between clusters
+pca_out <- prcomp(scaled_states)
+
+fviz_pca_ind(pca_out,
+             geom.ind = "point",
+             col.ind = cluster_df$Cluster,
+             palette = "jco",
+             legend.title = "Cluster")
+```
+
+```{r}
+# Prepare a U.S. map showing geographic distribution of clusters for spatial context
+cluster_df <- cluster_df %>%
+  mutate(region = tolower(State))
+
+us_map <- map_data("state")
+
+map_clustered <- left_join(us_map, cluster_df, by = "region")
+
+ggplot(map_clustered, aes(long, lat, group = group, fill = as.factor(Cluster))) +
+  geom_polygon(color = "white") +
+  coord_fixed(1.3) +
+  scale_fill_brewer(palette = "Set2", name = "Cluster") +
+  labs(title = "K-Means Clustering of U.S. States (Age 65–69 Breast Cancer Trends)",
+       caption = "Source: CDC WONDER, 1999–2021") +
+  theme_minimal()
+```
+
+```{r}
+# Compute the coefficient of variation (CV) to measure stability or volatility of trends within each state and cluster
+cv_data <- state_ts %>%
+  column_to_rownames("States") %>%
+  as.data.frame() %>%
+  mutate(CV = apply(., 1, function(x) sd(x)/mean(x))) %>%
+  rownames_to_column("States") %>%
+  left_join(cluster_df, by = c("States" = "State"))
+
+ggplot(cv_data, aes(x = Cluster, y = CV, fill = Cluster)) +
+  geom_boxplot() +
+  labs(title = "Volatility in Trends (Age 65–69) by Cluster",
+       y = "Coefficient of Variation") +
+  theme_minimal()
+```
+
+```{r}
+# Plot state-level time series by cluster to show differences in temporal patterns
+long_cases <- state_ts %>%
+  pivot_longer(-States, names_to = "Year", values_to = "Cases") %>%
+  mutate(Year = as.numeric(Year)) %>%
+  left_join(cluster_df, by = c("States" = "State"))
+
+ggplot(long_cases, aes(x = Year, y = Cases, group = States, color = Cluster)) +
+  geom_line(alpha = 0.6) +
+  labs(title = "State-wise Trends for Age 65–69 by Cluster",
+       y = "Cases") +
+  theme_minimal()
+```
+
+```{r}
+# Compare average case counts between two periods (1999–2010 and 2011–2021) for each cluster
+cluster_case_trends <- long_cases %>%
+  mutate(Period = ifelse(Year <= 2010, "1999–2010", "2011–2021"))
+
+summary_table <- cluster_case_trends %>%
+  group_by(Cluster, Period) %>%
+  summarise(Avg_Cases = round(mean(Cases), 1), .groups = "drop") %>%
+  pivot_wider(names_from = Period, values_from = Avg_Cases)
+
+print(summary_table)
+```
+
+```{r}
+# Visualise the average case count comparison by cluster and period using a grouped bar chart
+ggplot(cluster_case_trends %>%
+         group_by(Cluster, Period) %>%
+         summarise(Avg_Cases = round(mean(Cases), 1), .groups = "drop"),
+       aes(x = Cluster, y = Avg_Cases, fill = Period)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Breast Cancer Cases (Age 65–69) by Cluster and Period",
+       x = "Cluster", y = "Average Case Count") +
+  theme_minimal()
+```
+
